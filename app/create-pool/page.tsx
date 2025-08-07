@@ -1,30 +1,66 @@
 "use client"
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useConnection, useWallet } from '@solana/wallet-adapter-react';
+import { CpAmm, getSqrtPriceFromPrice } from "@meteora-ag/cp-amm-sdk";
+import { BN } from "@coral-xyz/anchor";
+import { clusterApiUrl, Connection, Keypair, PublicKey, sendAndConfirmRawTransaction, sendAndConfirmTransaction } from '@solana/web3.js';
+import { getMint } from '@solana/spl-token';
 
-// Mock token list
-const tokens = [
-  { symbol: 'SOL', name: 'Solana', icon: '🌞' },
-  { symbol: 'USDC', name: 'USD Coin', icon: '💵' },
-  { symbol: 'mSOL', name: 'Marinade Staked SOL', icon: '🪙' },
-  { symbol: 'USDT', name: 'Tether', icon: '💲' },
-  { symbol: 'JUP', name: 'Jupiter', icon: '✨' },
-  { symbol: 'BONK', name: 'Bonk', icon: '🐕' },
-];
 
 export default function CreatePoolPage() {
   const router = useRouter();
-  const [token0, setToken0] = useState(tokens[0]);
-  const [token1, setToken1] = useState(tokens[1]);
   const [feeTier, setFeeTier] = useState('0.3');
+  const [token0, setToken0] = useState("")
+  const [token1, setToken1] = useState("")
   const [showToken0List, setShowToken0List] = useState(false);
   const [showToken1List, setShowToken1List] = useState(false);
 
-  const handleCreatePool = (e: React.FormEvent) => {
+  const { publicKey, sendTransaction } = useWallet()
+  const { connection } = useConnection()
+
+  const handleCreatePool = async (e: React.FormEvent) => {
+    // 6g8hayQxus1X5BnRDojHA1LmCSkjd411zxT1Y9qPj2jz
     e.preventDefault();
-    // In a real app, you would create the pool here
-    alert('Pool creation would be implemented here');
-    router.push('/pools');
+    if (!publicKey || !connection) return;
+    const cpAmm = new CpAmm(connection)
+    const configPubkey = new PublicKey("6d5MYCCy7gn8oi8fQqzhdWYz4JoYTxLpBdifSQFyVNJM")
+    const configState = await cpAmm.fetchConfigState(configPubkey);
+    console.log("CONFIG STATEE HRE: ", configState)
+    const initPrice = "10"
+    const baseToken = new PublicKey(token0)
+    const quoteToken = new PublicKey(token1)
+    const baseTokenProgramId = (await connection.getAccountInfo(baseToken))?.owner
+    const baseTokenMint = await getMint(connection, baseToken, "confirmed", baseTokenProgramId!)
+    const quoteTokenProgramId = (await connection.getAccountInfo(quoteToken))?.owner
+    const quoteTokenMint = await getMint(connection, quoteToken, "confirmed", quoteTokenProgramId!)
+    const { actualInputAmount, consumedInputAmount, outputAmount, liquidityDelta } = cpAmm.getDepositQuote({
+      inAmount: new BN(100000000), // 5 tokenA (base token) with 9 decimals
+      isTokenA: true,
+      minSqrtPrice: configState.sqrtMinPrice,
+      maxSqrtPrice: configState.sqrtMaxPrice,
+      sqrtPrice: getSqrtPriceFromPrice(initPrice, baseTokenMint.decimals, quoteTokenMint.decimals),
+    })
+    const createPoolTx = await cpAmm.createPool({
+      payer: publicKey,
+      creator: publicKey,
+      config: configPubkey,
+      positionNft: Keypair.generate().publicKey,
+      tokenAMint: baseTokenMint.address,
+      tokenBMint: quoteTokenMint.address,
+      activationPoint: null,
+      tokenAAmount: consumedInputAmount,
+      tokenBAmount: outputAmount,
+      initSqrtPrice: getSqrtPriceFromPrice(initPrice, baseTokenMint.decimals, quoteTokenMint.decimals),
+      liquidityDelta: liquidityDelta,
+      tokenAProgram: baseTokenProgramId!,
+      tokenBProgram: quoteTokenProgramId!
+    });
+    createPoolTx.recentBlockhash = (await connection.getLatestBlockhash()).blockhash;
+    createPoolTx.feePayer = publicKey;
+    // const createPoolSig = await sendTransaction(createPoolTx, connection);
+    console.log("sent transaction and created pool: ", createPoolTx.serializeMessage().toString("base64"))
+    // router.push('/pools');
   };
 
   return (
@@ -39,41 +75,13 @@ export default function CreatePoolPage() {
         <div className="space-y-4">
           <div className="relative">
             <label className="block text-sm font-medium mb-2">Token 0</label>
-            <div
-              className="bg-gray-900 rounded-lg p-4 flex items-center justify-between cursor-pointer"
-              onClick={() => setShowToken0List(!showToken0List)}
-            >
-              <div className="flex items-center space-x-3">
-                <span className="text-2xl">{token0.icon}</span>
-                <span className="text-lg">{token0.symbol}</span>
-              </div>
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-            </div>
-
-            {showToken0List && (
-              <div className="absolute z-10 mt-2 w-full bg-gray-900 rounded-lg shadow-lg border border-gray-800 max-h-60 overflow-auto">
-                {tokens.map((token) => (
-                  <div
-                    key={token.symbol}
-                    className={`flex items-center p-3 hover:bg-gray-800 cursor-pointer ${token.symbol === token0.symbol ? 'bg-gray-800' : ''}`}
-                    onClick={() => {
-                      if (token.symbol !== token1.symbol) {
-                        setToken0(token);
-                        setShowToken0List(false);
-                      }
-                    }}
-                  >
-                    <span className="text-xl mr-3">{token.icon}</span>
-                    <div>
-                      <div className="font-medium">{token.symbol}</div>
-                      <div className="text-sm text-gray-400">{token.name}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <input
+              type="text"
+              value={token0}
+              onChange={(e) => setToken0(e.target.value)}
+              className="w-full bg-gray-900 rounded-lg p-4 text-lg outline-none"
+              placeholder="Enter token symbol (e.g., SOL, USDC)"
+            />
           </div>
 
           <div className="flex justify-center">
@@ -86,41 +94,13 @@ export default function CreatePoolPage() {
 
           <div className="relative">
             <label className="block text-sm font-medium mb-2">Token 1</label>
-            <div
-              className="bg-gray-900 rounded-lg p-4 flex items-center justify-between cursor-pointer"
-              onClick={() => setShowToken1List(!showToken1List)}
-            >
-              <div className="flex items-center space-x-3">
-                <span className="text-2xl">{token1.icon}</span>
-                <span className="text-lg">{token1.symbol}</span>
-              </div>
-              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
-                <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
-              </svg>
-            </div>
-
-            {showToken1List && (
-              <div className="absolute z-10 mt-2 w-full bg-gray-900 rounded-lg shadow-lg border border-gray-800 max-h-60 overflow-auto">
-                {tokens.map((token) => (
-                  <div
-                    key={token.symbol}
-                    className={`flex items-center p-3 hover:bg-gray-800 cursor-pointer ${token.symbol === token1.symbol ? 'bg-gray-800' : ''}`}
-                    onClick={() => {
-                      if (token.symbol !== token0.symbol) {
-                        setToken1(token);
-                        setShowToken1List(false);
-                      }
-                    }}
-                  >
-                    <span className="text-xl mr-3">{token.icon}</span>
-                    <div>
-                      <div className="font-medium">{token.symbol}</div>
-                      <div className="text-sm text-gray-400">{token.name}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            <input
+              type="text"
+              value={token1}
+              onChange={(e) => setToken1(e.target.value)}
+              className="w-full bg-gray-900 rounded-lg p-4 text-lg outline-none"
+              placeholder="Enter token symbol (e.g., USDC, SOL)"
+            />
           </div>
         </div>
 
@@ -154,7 +134,7 @@ export default function CreatePoolPage() {
           <label className="block text-sm font-medium mb-2">Initial Price</label>
           <div className="bg-gray-900 rounded-lg p-4">
             <div className="text-sm text-gray-400 mb-2">
-              Initial {token0.symbol} price in {token1.symbol}
+              Initial {token0} price in {token1}
             </div>
             <input
               type="number"
@@ -164,7 +144,7 @@ export default function CreatePoolPage() {
               min="0"
             />
             <div className="text-sm text-gray-400 mt-1">
-              {token0.symbol} per {token1.symbol}
+              {token0} per {token1}
             </div>
           </div>
         </div>
